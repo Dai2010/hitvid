@@ -65,6 +65,15 @@ Then you can run the compiled binary from anywhere:
 ./hitvid -w 120 -h 40 /path/to/another/video.mkv
 ```
 
+### Debian package
+
+Pushes and pull requests build an `amd64` Debian package in a Debian 11
+container. The workflow uploads the `.deb` as a GitHub Actions artifact; tagged
+releases use the tag (without a leading `v`) as the package version. The package
+installs `/usr/bin/hitvid` and declares `ffmpeg` and `chafa` as runtime
+dependencies. Pushing a `v*` tag also creates or updates a GitHub Release and
+attaches the generated `.deb` file.
+
 ## Command-Line Options
 
 The player's behavior can be fine-tuned with the following flags:
