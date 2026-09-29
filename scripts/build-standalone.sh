@@ -24,7 +24,7 @@ for tool in go cc file readelf; do
     }
 done
 
-"$ROOT_DIR/scripts/build-native.sh"
+bash "$ROOT_DIR/scripts/build-native.sh"
 mkdir -p "$(dirname "$OUTPUT")"
 
 (
@@ -34,5 +34,5 @@ mkdir -p "$(dirname "$OUTPUT")"
 )
 
 chmod 0755 "$OUTPUT"
-"$ROOT_DIR/scripts/verify-standalone.sh" "$OUTPUT"
+bash "$ROOT_DIR/scripts/verify-standalone.sh" "$OUTPUT"
 echo "Built standalone hitvid: $OUTPUT"
