@@ -1,10 +1,18 @@
-.PHONY: native test build
+.PHONY: native standalone verify test build compat
 
 native:
-	./scripts/build-native.sh
+	bash ./scripts/build-native.sh
+
+standalone:
+	bash ./scripts/build-standalone.sh
+
+verify:
+	bash ./scripts/verify-standalone.sh ./dist/hitvid-linux-amd64
 
 test:
 	go test ./...
 
-build:
-	go build -o hitvid .
+build: standalone
+
+compat:
+	go build -o hitvid-compat .
