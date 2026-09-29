@@ -3,9 +3,9 @@
 [![Go Version](https://img.shields.io/badge/go-1.18+-blue.svg)](https://golang.org)
 [![License: AGPLv3](https://img.shields.io/badge/License-AGPLv3-yellow.svg)](https://opensource.org/licenses/AGPLv3)
 
-`hitvid` is a high-performance, feature-rich video player designed to run directly in your terminal. It uses **ffmpeg** for video processing and **chafa** for character-based rendering. Frames are streamed through memory with bounded buffering instead of being written to a temporary frame directory.
+`hitvid` is a high-performance terminal video player. **v1.2.2 official Linux amd64 artifacts are fully standalone at runtime**: FFmpeg and Chafa are linked into the executable and invoked through native APIs, with no separate `ffmpeg`, `ffprobe`, `chafa`, or media shared-library installation required.
 
-We've completely rewritten hitvid in Go, achieving a performance leap! We've leveraged multiple technologies to accelerate video rendering. We now support Linux, macOS, Windows, and other platforms!
+The release backend decodes frames with the embedded FFmpeg libraries, converts them to RGB in memory, and renders them through the embedded Chafa canvas API. A compatibility development backend remains available for unsupported targets.
 
 However, we still keep the previous shell version in the `/old` directory, leaving it as a last resort for platforms that are really incompatible (although there are almost no such platforms).
 
@@ -21,21 +21,16 @@ However, we still keep the previous shell version in the `/old` directory, leavi
 *   **Graceful Cancellation**: Uses `context.Context` throughout the application for clean and immediate shutdown of all processes and goroutines.
 *   **Terminal UI**: Manages the terminal state, hiding the cursor and using an alternate screen buffer for a clean viewing experience that restores the terminal on exit.
 
-## Dependencies
+## Runtime Dependencies
 
-The compatibility build uses the following command-line tools from your system's `PATH`:
+The official **Linux amd64 v1.2.2 release has no external runtime software dependencies**. Download the raw binary or install the `.deb` and run it directly.
 
-1.  **FFmpeg**: The core engine for decoding and streaming frames from video files.
-    *   **APT or YUM Installation** `sudo apt install ffmpeg` or `sudo yum install ffmpeg` 
-    *   **Website & Installation**: [ffmpeg.org](https://ffmpeg.org/download.html)
-2.  **Chafa**: The utility for converting streamed images into terminal character art.
-    *   **Website & Installation**: [hpjansson.org/chafa](https://hpjansson.org/chafa/)
-    *   **APT or YUM Installation** `sudo apt install chafa` or `sudo yum install chafa` 
+Building from source requires Go, a C toolchain, Meson, Autotools, and the development libraries used to produce the fully static binary. These are build-time requirements only.
 
 ## Installation & Usage
 
-#### 1. Install Dependencies
-First, ensure you have installed Go (version 1.24+), ffmpeg, and chafa for the compatibility build.
+#### 1. Official standalone release
+Use `hitvid-linux-amd64` or the `hitvid_*_amd64.deb` attached to the GitHub Release. No FFmpeg or Chafa package installation is required.
 
 #### 2. Get the Source
 Clone the repository to your local machine (note: example URL).
@@ -44,35 +39,23 @@ git clone https://github.com/hitmux/hitvid.git
 cd hitvid
 ```
 
-#### 3. Run Directly
-You can run the program directly using `go run`. This is useful for quick plays without needing to build a binary.
+#### 3. Build the standalone binary
 
 ```bash
-# Basic usage
-go run . /path/to/your/video.mp4
-
-# Advanced usage with custom rendering options
-go run . -fps 24 -colors full -symbols block /path/to/your/video.webm
+make build
 ```
 
-#### 4. Build the Binary
-For a permanent and faster-launching command, build the executable.
+This produces `dist/hitvid-linux-amd64`, runs the native decode/render tests, and verifies that the executable is fully static and can start with an empty `PATH`.
+
 ```bash
-go build -o hitvid .
+./dist/hitvid-linux-amd64 -w 120 -h 40 /path/to/another/video.mkv
 ```
-Then you can run the compiled binary from anywhere:
-```bash
-./hitvid -w 120 -h 40 /path/to/another/video.mkv
-```
+
+For development on unsupported native targets, `make compat` builds the external-command compatibility backend.
 
 ### Debian package
 
-Pushes and pull requests build an `amd64` Debian package in a Debian 11
-container. The workflow uploads the `.deb` as a GitHub Actions artifact; tagged
-releases use the tag (without a leading `v`) as the package version. The package
-installs `/usr/bin/hitvid` and declares `ffmpeg` and `chafa` as runtime
-dependencies. Pushing a `v*` tag also creates or updates a GitHub Release and
-attaches the generated `.deb` file.
+Pull requests and releases build an `amd64` Debian package in a Debian 13 container. The package installs the same fully static standalone executable at `/usr/bin/hitvid` and declares no `ffmpeg` or `chafa` dependency. Tagged `v*` builds attach both the raw standalone binary and the `.deb` to the GitHub Release.
 
 ## Command-Line Options
 
@@ -107,46 +90,26 @@ Control playback with these keyboard shortcuts:
 
 ## Architecture Deep Dive
 
-`hitvid` is not a simple script; it's a concurrent application designed for efficiency. Its architecture can be broken down into several key areas:
+The v1.2.2 release path is an in-process producer/consumer pipeline:
 
-#### 1. The Rendering Pipeline (Producer-Consumer Model)
+1. **Embedded FFmpeg decoder** reads the video container and decodes frames through libavformat/libavcodec.
+2. **libswscale** converts decoded frames to RGB in memory.
+3. **Embedded Chafa workers** render RGB frames directly through the Chafa canvas API.
+4. A bounded frame store applies backpressure, keeping memory usage independent of total video duration.
+5. Playback consumes rendered frames while keyboard events control pause, seek, speed, and playlist navigation.
 
-The core of the player is a multi-stage pipeline that processes video frames asynchronously.
+No release-path stage creates frame files or spawns `ffmpeg`, `ffprobe`, or `chafa` processes.
 
-1.  **Frame Extractor (`ffmpeg`)**: FFmpeg is spawned with `image2pipe` and writes a JPEG stream to stdout. No extracted frame is written to a temporary directory.
+## Standalone build
 
-2.  **Job Dispatcher (Goroutine)**: The Go reader splits the stream at JPEG boundaries and pushes complete images into a bounded channel. Backpressure stops FFmpeg from getting ahead of playback.
-
-3.  **Frame Renderers (`chafa` Workers)**: Workers pass each JPEG through Chafa's stdin and store terminal output in a fixed-capacity in-memory store. Failed frames are recorded so playback cannot deadlock.
-
-4.  **Playback Loop (Main Goroutine)**: Playback waits on a condition variable for the next indexed frame, consumes it, and releases its buffer slot. The cache cannot grow with video duration.
-
-#### 2. Advanced Synchronization
-
-Managing the state between these concurrent parts is critical.
-
-*   **`sync.Mutex (stateMutex)`**: A global mutex protects shared state variables such as `isPaused`, `currentFrameIndex`, `totalFrames`, and user input actions. This prevents race conditions when playback and rendering progress concurrently.
-
-*   **`sync.Cond (frameReadyCond)`**: This is the key to efficient waiting. The playback loop uses `frameReadyCond.Wait()` when it needs a frame that hasn't been rendered yet. This puts the goroutine to sleep, consuming no CPU. When a rendering worker finishes a frame, it calls `frameReadyCond.Broadcast()`, which wakes up the playback loop to re-check if its required frame is now available. This is vastly more efficient than a `time.Sleep()` loop.
-
-#### 3. State and Lifecycle Management
-
-*   **`context.Context`**: A `context.WithCancel` is created for each video played. This `context` is passed down to every goroutine and `exec.Command` related to that video. When the user quits, skips to the next video, or the video finishes, `cancel()` is called. This sends a cancellation signal down the entire chain, gracefully terminating `ffmpeg`, any running `chafa` processes, and all associated goroutines, ensuring no orphaned processes are left behind.
-
-*   **Main Control Loop**: The `main()` function contains the top-level control loop. It manages the playlist, handles transitions between videos (`next`, `prev`), and re-initializes the state for each new video. This outer loop is responsible for the application's overall lifecycle, while the `playVideo` function manages the lifecycle of a single video playback session.
-
-## Native build
-
-The repository includes a C bridge for linking FFmpeg and Chafa as static
-libraries. It uses FFmpeg's decoder API and Chafa's RGB canvas API directly,
-without command-line processes or image loaders. Build it with `make native`;
-generated files are kept under `native/build/`. The bridge requires a C
-toolchain, Meson, Autotools, and the corresponding LGPL source and notices.
+`make build` downloads the pinned FFmpeg, GLib, and Chafa source releases, builds static libraries under `native/build/`, runs native tests, links a fully static Linux amd64 executable, and runs `scripts/verify-standalone.sh`.
 
 ```bash
-make native
-go build -tags native -o hitvid-native .
+make build
+make verify
 ```
+
+`make native` builds only the pinned native libraries. `make compat` remains available for development builds that use external FFmpeg/Chafa commands.
 
 ## License
 
