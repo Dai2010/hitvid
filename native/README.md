@@ -1,23 +1,31 @@
-# Native media bridge
+# Native media backend
 
-`media_bridge.c` contains the narrow C ABI used by the native backend. It
-feeds decoded RGB frames to Chafa's canvas API without creating image files.
+The v1.2.2 Linux amd64 release uses this backend exclusively. FFmpeg and Chafa
+are linked into the hitvid executable and are called through their C APIs, so
+playback does not spawn `ffmpeg`, `ffprobe`, or `chafa` processes.
 
-Build the pinned static dependencies with:
+## Build
 
 ```sh
-make native
-go build -tags native -o hitvid-native .
+make build
 ```
 
-The script builds FFmpeg, GLib, and Chafa below `native/build/`. The default Go
-binary continues to use the diskless process pipeline until the native build
-is selected in the release build configuration. The bridge deliberately builds
-Chafa without its command-line tools and image loaders because hitvid passes
-RGB pixels directly.
+`make build` performs four stages:
 
-FFmpeg is configured for file input and common video containers/codecs. Frame
-rate sampling is done from timestamps and RGB conversion uses libswscale. GPL
-and nonfree components are disabled.
-The release process must ship the corresponding source and license notices for
-the LGPL libraries and any statically linked objects.
+1. downloads the pinned FFmpeg, GLib, and Chafa source releases;
+2. builds static libraries below `native/build/`;
+3. runs the native Go tests, including an embedded decode/render smoke test;
+4. links `dist/hitvid-linux-amd64` as a fully static executable and verifies
+   that it has no ELF `NEEDED` entries and can start with an empty `PATH`.
+
+Build-time tools such as a C compiler, Meson, Autotools, and Go are required
+only when compiling from source. They are not runtime requirements of the
+official standalone binary.
+
+FFmpeg is configured with file input and the video demuxers/decoders used by
+hitvid. Chafa is built without its command-line program or image loaders
+because hitvid passes decoded RGB frames directly to the Chafa canvas API.
+
+The compatibility Go backend remains available via `make compat` for
+development and unsupported targets. That developer build uses external
+FFmpeg/Chafa commands and is not an official v1.2.2 release artifact.
