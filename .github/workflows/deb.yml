@@ -1,4 +1,4 @@
-name: Debian package
+name: Standalone release
 
 on:
   push:
@@ -10,10 +10,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-deb:
+  build-release:
     permissions:
       contents: read
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -29,58 +29,59 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Build in Debian 11
+      - name: Build fully standalone binary in Debian 13
         env:
           HITVID_VERSION: ${{ steps.package.outputs.version }}
         run: |
-          docker run --rm --platform linux/amd64 \
-            -e HITVID_VERSION \
-            -e HOST_UID="$(id -u)" \
-            -e HOST_GID="$(id -g)" \
-            -v "$GITHUB_WORKSPACE:/src" \
-            -w /src \
-            debian:11 \
-            bash -euxo pipefail -c '
-              echo "deb http://archive.debian.org/debian bullseye main" > /etc/apt/sources.list
-              printf "%s\n" "Acquire::Check-Valid-Until \"false\";" > /etc/apt/apt.conf.d/99archive
+          docker run --rm --platform linux/amd64             -e HITVID_VERSION             -e HOST_UID="$(id -u)"             -e HOST_GID="$(id -g)"             -v "$GITHUB_WORKSPACE:/src"             -w /src             debian:13             bash -euxo pipefail -c '
               apt-get update
-              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                ca-certificates curl xz-utils
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends                 build-essential ca-certificates curl xz-utils                 pkg-config meson ninja-build autoconf automake libtool                 libffi-dev libpcre2-dev zlib1g-dev                 file binutils dpkg-dev
               curl -fsSL https://go.dev/dl/go1.24.5.linux-amd64.tar.gz -o /tmp/go.tar.gz
               tar -C /usr/local -xzf /tmp/go.tar.gz
               export PATH=/usr/local/go/bin:$PATH
               go version
-              ./scripts/build-deb.sh
-              chown "$HOST_UID:$HOST_GID" dist/*.deb
+              mkdir -p dist
+              HITVID_OUTPUT=/src/dist/hitvid-linux-amd64 bash ./scripts/build-standalone.sh
+              HITVID_BINARY=/src/dist/hitvid-linux-amd64 bash ./scripts/build-deb.sh
+              chown -R "$HOST_UID:$HOST_GID" dist
             '
 
-      - name: Inspect Debian package
+      - name: Verify release artifact on host
         run: |
+          file dist/hitvid-linux-amd64
+          if readelf -d dist/hitvid-linux-amd64 | grep -q '(NEEDED)'; then
+            echo "release binary has dynamic dependencies" >&2
+            exit 1
+          fi
+          env -i HOME=/tmp TERM=xterm-256color PATH=/nonexistent             ./dist/hitvid-linux-amd64 -help >/dev/null
           dpkg-deb --info dist/*.deb
           dpkg-deb --contents dist/*.deb
           test "$(dpkg-deb --field dist/*.deb Architecture)" = amd64
+          test -z "$(dpkg-deb --field dist/*.deb Depends || true)"
 
-      - name: Upload Debian package
+      - name: Upload standalone release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: hitvid-deb-${{ steps.package.outputs.version }}
-          path: dist/*.deb
+          name: hitvid-standalone-${{ steps.package.outputs.version }}
+          path: |
+            dist/hitvid-linux-amd64
+            dist/*.deb
           if-no-files-found: error
 
   publish-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: build-deb
+    needs: build-release
     permissions:
       contents: write
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out release tag
         uses: actions/checkout@v4
 
-      - name: Download Debian package
+      - name: Download standalone artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: hitvid-deb-*
+          pattern: hitvid-standalone-*
           path: dist
           merge-multiple: true
 
@@ -90,9 +91,7 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" dist/*.deb --clobber
+            gh release upload "$TAG_NAME" dist/* --clobber
           else
-            gh release create "$TAG_NAME" dist/*.deb \
-              --title "$TAG_NAME" \
-              --generate-notes
+            gh release create "$TAG_NAME" dist/*               --title "$TAG_NAME"               --generate-notes
           fi
