@@ -35,23 +35,26 @@ fetch_source() {
     local url=$2
     local archive="$SRC_DIR/$name.tar.xz"
     local source="$SRC_DIR/$name"
-    if [[ ! -d "$source" ]]; then
-        [[ -f "$archive" ]] || curl -fL --retry 3 -o "$archive" "$url"
-        local expected="${3:-}"
-        if [[ -n "$expected" ]]; then
-            echo "$expected  $archive" | sha256sum -c - >/dev/null
-        fi
-        tar -xJf "$archive" -C "$SRC_DIR"
+    [[ -f "$archive" ]] || curl -fL --retry 3 -o "$archive" "$url"
+    local expected="${3:-}"
+    if [[ -n "$expected" ]]; then
+        echo "$expected  $archive" | sha256sum -c - >/dev/null
     fi
+
+    # Never trust a previously extracted tree for a rebuild. The archive is
+    # the pinned, checksummed input; re-extracting it prevents stale or
+    # locally modified source trees from bypassing versions.lock.
+    rm -rf "$source"
+    tar -xJf "$archive" -C "$SRC_DIR"
     printf '%s\n' "$source"
 }
 
 build_ffmpeg() {
-    local source
-    source=$(fetch_source "ffmpeg-$FFMPEG_VERSION" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" "$FFMPEG_SHA256")
     if [[ -f "$PREFIX/lib/libavcodec.a" ]]; then
         return
     fi
+    local source
+    source=$(fetch_source "ffmpeg-$FFMPEG_VERSION" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" "$FFMPEG_SHA256")
     pushd "$source" >/dev/null
     ./configure \
         --prefix="$PREFIX" \
@@ -69,11 +72,11 @@ build_ffmpeg() {
 }
 
 build_glib() {
-    local source
-    source=$(fetch_source "glib-$GLIB_VERSION" "https://download.gnome.org/sources/glib/${GLIB_VERSION%.*}/glib-$GLIB_VERSION.tar.xz" "$GLIB_SHA256")
     if [[ -f "$PREFIX/lib/libglib-2.0.a" ]]; then
         return
     fi
+    local source
+    source=$(fetch_source "glib-$GLIB_VERSION" "https://download.gnome.org/sources/glib/${GLIB_VERSION%.*}/glib-$GLIB_VERSION.tar.xz" "$GLIB_SHA256")
     rm -rf "$source/build-hitvid"
     meson setup "$source/build-hitvid" "$source" \
         --prefix="$PREFIX" --libdir=lib --buildtype=release \
@@ -85,11 +88,11 @@ build_glib() {
 }
 
 build_chafa() {
-    local source
-    source=$(fetch_source "chafa-$CHAFA_VERSION" "https://github.com/hpjansson/chafa/releases/download/$CHAFA_VERSION/chafa-$CHAFA_VERSION.tar.xz" "$CHAFA_SHA256")
     if [[ -f "$PREFIX/lib/libchafa.a" ]]; then
         return
     fi
+    local source
+    source=$(fetch_source "chafa-$CHAFA_VERSION" "https://github.com/hpjansson/chafa/releases/download/$CHAFA_VERSION/chafa-$CHAFA_VERSION.tar.xz" "$CHAFA_SHA256")
     pushd "$source" >/dev/null
     [[ -f configure ]] || autoreconf -fi
     PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig" ./configure \
@@ -101,8 +104,9 @@ build_chafa() {
     popd >/dev/null
 }
 
-build_ffmpeg
-build_glib
-build_chafa
-
-echo "Pinned static FFmpeg, GLib and Chafa libraries built under $BUILD_DIR"
+if [[ "${HITVID_BUILD_NATIVE_LIBS:-1}" == "1" ]]; then
+    build_ffmpeg
+    build_glib
+    build_chafa
+    echo "Pinned static FFmpeg, GLib and Chafa libraries built under $BUILD_DIR"
+fi

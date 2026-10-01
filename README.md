@@ -70,6 +70,7 @@ The player's behavior can be fine-tuned with the following flags:
 | `-dither <str>`   | Dithering algorithm for chafa (e.g., `none`, `ordered`, `diffusion`).       | `ordered`                |
 | `-w <integer>`    | Render width in terminal columns.                                           | Terminal width           |
 | `-h <integer>`    | Render height in terminal rows.                                             | Terminal height - 1      |
+| `-scale <mode>`   | Scaling mode: `fit`, `fill`, or `stretch`.                                  | `fit`                    |
 | `-threads <int>`  | Number of parallel threads to use for rendering frames with Chafa.          | `4`                      |
 | `-help`           | Display a detailed help message and exit.                                   | `false`                  |
 
@@ -97,6 +98,8 @@ The v1.2.2 release path is an in-process producer/consumer pipeline:
 3. **Embedded Chafa workers** render RGB frames directly through the Chafa canvas API.
 4. A bounded frame store applies backpressure, keeping memory usage independent of total video duration.
 5. Playback consumes rendered frames while keyboard events control pause, seek, speed, and playlist navigation.
+
+The native Linux backend currently supports `-scale fit`; `fill` and `stretch` are available in the compatibility backend.
 
 No release-path stage creates frame files or spawns `ffmpeg`, `ffprobe`, or `chafa` processes.
 

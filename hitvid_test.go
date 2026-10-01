@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -111,5 +112,108 @@ func TestValidateNumThreads(t *testing.T) {
 		if err := validateNumThreads(threads); err == nil {
 			t.Errorf("validateNumThreads(%d) succeeded, want an error", threads)
 		}
+	}
+}
+
+func TestRenderInfoLineFitsTerminalWidth(t *testing.T) {
+	statuses := []string{"PLAYING", "PAUSED", "BUFFERING", "FINISHED"}
+	for _, width := range []int{1, 2, 20, 40, 80, 89, 90, 200} {
+		for _, status := range statuses {
+			got := renderInfoLine(status, 120, 15, 1.0, 900, width)
+			if runes := len([]rune(got)); runes > width {
+				t.Errorf("renderInfoLine(%q, width=%d) produced %d columns: %q", status, width, runes, got)
+			}
+		}
+	}
+}
+
+func TestRenderInfoLineUnchangedWhenItFits(t *testing.T) {
+	got := renderInfoLine("PLAYING", 0, 15, 1.0, 30, 200)
+	want := "[PLAYING] 00:00 / 00:02 | Speed: 1.00x | " + controlsHint
+	if got != want {
+		t.Errorf("renderInfoLine returned %q, want %q", got, want)
+	}
+}
+
+func TestRenderInfoLineKeepsStatusOnNarrowTerminal(t *testing.T) {
+	got := renderInfoLine("PLAYING", 0, 15, 1.0, 30, 20)
+	if runes := len([]rune(got)); runes != 20 {
+		t.Fatalf("renderInfoLine produced %d columns, want 20: %q", runes, got)
+	}
+	if !strings.HasPrefix(got, "[PLAYING] 00:00") {
+		t.Errorf("renderInfoLine dropped the playback state prefix: %q", got)
+	}
+}
+
+func TestValidateScaleMode(t *testing.T) {
+	for _, mode := range []string{scaleFit, scaleFill, scaleStretch} {
+		if err := validateScaleMode(mode); err != nil {
+			t.Errorf("validateScaleMode(%q) returned %v", mode, err)
+		}
+	}
+	for _, mode := range []string{"", "FIT", "cover", "zoom"} {
+		if err := validateScaleMode(mode); err == nil {
+			t.Errorf("validateScaleMode(%q) succeeded, want an error", mode)
+		}
+	}
+}
+
+func TestValidateDimensions(t *testing.T) {
+	for _, dims := range [][2]int{{0, 0}, {1, 1}, {40, 11}, {200, 60}} {
+		if err := validateDimensions(dims[0], dims[1]); err != nil {
+			t.Errorf("validateDimensions(%d, %d) returned %v", dims[0], dims[1], err)
+		}
+	}
+	for _, dims := range [][2]int{{-1, 11}, {40, -1}, {-40, -11}} {
+		if err := validateDimensions(dims[0], dims[1]); err == nil {
+			t.Errorf("validateDimensions(%d, %d) succeeded, want an error", dims[0], dims[1])
+		}
+	}
+}
+
+func TestValidateNativeScaleMode(t *testing.T) {
+	for _, mode := range []string{scaleFit, scaleFill, scaleStretch} {
+		if err := validateNativeScaleMode(mode, false); err != nil {
+			t.Errorf("compatibility backend rejected %q: %v", mode, err)
+		}
+	}
+	if err := validateNativeScaleMode(scaleFit, true); err != nil {
+		t.Errorf("native backend rejected fit: %v", err)
+	}
+	for _, mode := range []string{scaleFill, scaleStretch} {
+		if err := validateNativeScaleMode(mode, true); err == nil {
+			t.Errorf("native backend accepted unsupported mode %q", mode)
+		}
+	}
+}
+
+func TestBuildVideoFilter(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		want string
+	}{
+		{
+			name: "fit keeps the source aspect inside the pixel box",
+			mode: scaleFit,
+			want: "fps=15,scale=240:132:force_original_aspect_ratio=decrease",
+		},
+		{
+			name: "fill covers the box and crops the overflow",
+			mode: scaleFill,
+			want: "fps=15,scale=240:132:force_original_aspect_ratio=increase,crop=240:132",
+		},
+		{
+			name: "stretch distorts the source to the box",
+			mode: scaleStretch,
+			want: "fps=15,scale=240:132",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := buildVideoFilter(15, 40, 11, test.mode); got != test.want {
+				t.Errorf("buildVideoFilter(15, 40, 11, %q) = %q, want %q", test.mode, got, test.want)
+			}
+		})
 	}
 }

@@ -41,6 +41,7 @@ jobs:
               export PATH=/usr/local/go/bin:$PATH
               go version
               mkdir -p dist
+              bash ./scripts/test-native-source-cache.sh
               HITVID_OUTPUT=/src/dist/hitvid-linux-amd64 bash ./scripts/build-standalone.sh
               HITVID_BINARY=/src/dist/hitvid-linux-amd64 bash ./scripts/build-deb.sh
               chown -R "$HOST_UID:$HOST_GID" dist
