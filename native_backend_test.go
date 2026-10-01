@@ -1,4 +1,4 @@
-//go:build native && linux && amd64
+//go:build native && cgo && linux && amd64
 
 package main
 
