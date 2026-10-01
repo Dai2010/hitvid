@@ -42,7 +42,7 @@ struct hv_decoder {
     int stream_index;
     int max_width;
     int target_fps;
-    double next_output_pts;
+    int64_t next_output_index;
     int output_width;
     int output_height;
     uint8_t *rgb;
@@ -185,11 +185,17 @@ int hv_decoder_next(hv_decoder *decoder, hv_video_frame *out)
                 decoder->frame->best_effort_timestamp != AV_NOPTS_VALUE) {
                 AVRational time_base = decoder->format->streams[decoder->stream_index]->time_base;
                 double pts = decoder->frame->best_effort_timestamp * av_q2d(time_base);
-                if (isfinite(decoder->next_output_pts) && pts + 1e-9 < decoder->next_output_pts) {
+                /* Keep the first frame falling into each slot of the output grid. Testing a
+                 * running deadline instead loses frames whenever the container timestamps are
+                 * coarser than the stream time base: a 24 fps source carrying millisecond pts
+                 * drops about one frame in three at -fps 24, and at the default -fps 15 settles
+                 * on every second frame, playing 1.25x too fast. */
+                int64_t index = (int64_t)floor(pts * decoder->target_fps + 0.5);
+                if (index < decoder->next_output_index) {
                     av_frame_unref(decoder->frame);
                     continue;
                 }
-                decoder->next_output_pts = pts + 1.0 / decoder->target_fps;
+                decoder->next_output_index = index + 1;
             }
             ret = hv_decoder_prepare_scaler(decoder, decoder->frame);
             if (ret < 0) {
@@ -252,7 +258,7 @@ int hv_decoder_seek(hv_decoder *decoder, double seconds)
     }
     avcodec_flush_buffers(decoder->codec);
     decoder->flushed = 0;
-    decoder->next_output_pts = seconds;
+    decoder->next_output_index = (int64_t)floor(seconds * decoder->target_fps + 0.5);
     return 0;
 }
 
