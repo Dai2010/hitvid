@@ -155,6 +155,17 @@ const ffmpegThreads = 1
 // its floor while still giving Chafa a few samples per cell to dither with.
 const chafaSourceScale = 6
 
+// chafaRenderTimeout bounds one external Chafa render in the compatibility
+// backend. Normal renders are orders of magnitude faster; this deliberately
+// generous deadline keeps slow machines working while guaranteeing that a
+// wedged child process cannot hold a render worker forever.
+const chafaRenderTimeout = 30 * time.Second
+
+// chafaWaitDelay bounds cleanup after cancellation, including the case where a
+// descendant inherited Chafa's output pipe and would otherwise keep Cmd.Wait
+// blocked after the Chafa process itself has been killed.
+const chafaWaitDelay = 2 * time.Second
+
 // Scaling modes accepted by the -scale flag.
 const (
 	scaleFit     = "fit"
@@ -171,6 +182,27 @@ const cellAspectRatio = 2
 type renderJob struct {
 	index int
 	jpeg  []byte
+}
+
+// runCompatChafa runs one external Chafa render with a per-frame deadline.
+// The child inherits the session context, so seek/quit cancellation still
+// stops it immediately; the timeout only covers a child that stops responding
+// while the session itself remains active.
+func runCompatChafa(ctx context.Context, executable string, args []string, jpeg []byte, timeout time.Duration) ([]byte, error) {
+	renderCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(renderCtx, executable, args...)
+	cmd.WaitDelay = chafaWaitDelay
+	cmd.Stdin = bytes.NewReader(jpeg)
+
+	output, err := cmd.Output()
+	if err != nil {
+		if ctxErr := renderCtx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("chafa render stopped: %w", ctxErr)
+		}
+	}
+	return output, err
 }
 
 type inputEvent byte
@@ -460,9 +492,7 @@ func playVideo(ctx context.Context, path string, startFrame int) string {
 			defer wgRender.Done()
 			for job := range jobs {
 				chafaArgs := []string{"--size", fmt.Sprintf("%dx%d", width, height), "--symbols", symbols, "--colors", colors, "--dither", dither, "-"}
-				chafaCmd := exec.CommandContext(sessionCtx, "chafa", chafaArgs...)
-				chafaCmd.Stdin = bytes.NewReader(job.jpeg)
-				output, err := chafaCmd.Output()
+				output, err := runCompatChafa(sessionCtx, "chafa", chafaArgs, job.jpeg, chafaRenderTimeout)
 				if err != nil {
 					if sessionCtx.Err() == nil {
 						log.Printf("chafa failed for frame %d: %v\r\n", job.index, err)
