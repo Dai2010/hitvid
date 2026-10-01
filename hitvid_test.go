@@ -4,10 +4,93 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+const chafaHelperMarker = "hitvid-chafa-helper"
+
+func TestCompatChafaHelper(t *testing.T) {
+	if len(os.Args) < 2 || os.Args[len(os.Args)-2] != chafaHelperMarker {
+		return
+	}
+
+	switch os.Args[len(os.Args)-1] {
+	case "hang":
+		time.Sleep(time.Hour)
+	case "slow":
+		time.Sleep(150 * time.Millisecond)
+		_, _ = os.Stdout.WriteString("rendered")
+	}
+}
+
+func compatChafaHelperArgs(mode string) []string {
+	return []string{"-test.run=^TestCompatChafaHelper$", "--", chafaHelperMarker, mode}
+}
+
+func TestRunCompatChafaTimesOutHungProcess(t *testing.T) {
+	for i := 0; i < 3; i++ {
+		started := time.Now()
+		_, err := runCompatChafa(
+			context.Background(),
+			os.Args[0],
+			compatChafaHelperArgs("hang"),
+			nil,
+			100*time.Millisecond,
+		)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("attempt %d: got %v, want context deadline exceeded", i+1, err)
+		}
+		if elapsed := time.Since(started); elapsed > 2*time.Second {
+			t.Fatalf("attempt %d: hung helper cleanup took %s", i+1, elapsed)
+		}
+	}
+}
+
+func TestRunCompatChafaSessionCancellationStopsHungProcess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := runCompatChafa(
+			ctx,
+			os.Args[0],
+			compatChafaHelperArgs("hang"),
+			nil,
+			30*time.Second,
+		)
+		done <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v, want context canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hung helper survived session cancellation")
+	}
+}
+
+func TestRunCompatChafaAllowsSlowRenderWithinDeadline(t *testing.T) {
+	output, err := runCompatChafa(
+		context.Background(),
+		os.Args[0],
+		compatChafaHelperArgs("slow"),
+		nil,
+		3*time.Second,
+	)
+	if err != nil {
+		t.Fatalf("slow helper failed before deadline: %v", err)
+	}
+	if !bytes.Contains(output, []byte("rendered")) {
+		t.Fatalf("slow helper output %q does not contain rendered marker", output)
+	}
+}
 
 func TestInputEventsFromReader(t *testing.T) {
 	got := inputEventsFromReader(bytes.NewBufferString("q +-\x1b[A\x1b[B\x1b[C\x1b[D"))
