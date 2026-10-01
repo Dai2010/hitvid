@@ -39,7 +39,7 @@ fetch_source() {
         [[ -f "$archive" ]] || curl -fL --retry 3 -o "$archive" "$url"
         local expected="${3:-}"
         if [[ -n "$expected" ]]; then
-            echo "$expected  $archive" | sha256sum -c -
+            echo "$expected  $archive" | sha256sum -c - >/dev/null
         fi
         tar -xJf "$archive" -C "$SRC_DIR"
     fi
