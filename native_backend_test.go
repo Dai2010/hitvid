@@ -1,4 +1,4 @@
-//go:build native && cgo && linux && amd64
+//go:build native && cgo && (linux || android) && (amd64 || arm64)
 
 package main
 
@@ -13,6 +13,7 @@ func TestNativeBackendEmbeddedDecodeAndRender(t *testing.T) {
 	if !nativeBackendAvailable() {
 		t.Fatal("native backend is unavailable in a native build")
 	}
+	t.Setenv("TERM", "xterm-256color")
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "frame.ppm")
@@ -61,5 +62,8 @@ func TestNativeBackendEmbeddedDecodeAndRender(t *testing.T) {
 	}
 	if len(bytes.TrimSpace(output)) == 0 {
 		t.Fatal("embedded renderer returned empty output")
+	}
+	if !bytes.Contains(output, []byte("\x1b[")) {
+		t.Fatalf("embedded renderer emitted no escape sequences; the terminal description is empty (got %q)", output)
 	}
 }
