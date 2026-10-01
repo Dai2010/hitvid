@@ -134,6 +134,9 @@ Managing the state between these concurrent parts is critical.
 
 *   **`context.Context`**: A `context.WithCancel` is created for each video played. This `context` is passed down to every goroutine and `exec.Command` related to that video. When the user quits, skips to the next video, or the video finishes, `cancel()` is called. This sends a cancellation signal down the entire chain, gracefully terminating `ffmpeg`, any running `chafa` processes, and all associated goroutines, ensuring no orphaned processes are left behind.
 
+The native Linux backend currently supports `-scale fit`; `fill` and `stretch`
+are available in the compatibility backend.
+
 *   **Main Control Loop**: The `main()` function contains the top-level control loop. It manages the playlist, handles transitions between videos (`next`, `prev`), and re-initializes the state for each new video. This outer loop is responsible for the application's overall lifecycle, while the `playVideo` function manages the lifecycle of a single video playback session.
 
 ## Native build
