@@ -171,6 +171,22 @@ func TestValidateDimensions(t *testing.T) {
 	}
 }
 
+func TestValidateNativeScaleMode(t *testing.T) {
+	for _, mode := range []string{scaleFit, scaleFill, scaleStretch} {
+		if err := validateNativeScaleMode(mode, false); err != nil {
+			t.Errorf("compatibility backend rejected %q: %v", mode, err)
+		}
+	}
+	if err := validateNativeScaleMode(scaleFit, true); err != nil {
+		t.Errorf("native backend rejected fit: %v", err)
+	}
+	for _, mode := range []string{scaleFill, scaleStretch} {
+		if err := validateNativeScaleMode(mode, true); err == nil {
+			t.Errorf("native backend accepted unsupported mode %q", mode)
+		}
+	}
+}
+
 func TestBuildVideoFilter(t *testing.T) {
 	tests := []struct {
 		name string
