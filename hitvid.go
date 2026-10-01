@@ -108,6 +108,13 @@ func validateDimensions(width, height int) error {
 	return nil
 }
 
+func validateNativeScaleMode(mode string, native bool) error {
+	if native && mode != scaleFit {
+		return fmt.Errorf("native backend supports only -scale %q", scaleFit)
+	}
+	return nil
+}
+
 // buildVideoFilter renders the FFmpeg -vf argument for one scaling mode. The
 // pixel box is the character canvas converted to pixels, so the frame FFmpeg
 // produces already has the shape Chafa is about to draw into: "fit" keeps the
@@ -410,9 +417,6 @@ func handleInput(ctx context.Context, events <-chan inputEvent, cancel context.C
 // seek restarts FFmpeg at a new timestamp.
 func playVideo(ctx context.Context, path string, startFrame int) string {
 	if nativeBackendAvailable() {
-		if scaleMode != scaleFit {
-			log.Printf("Warning: the native backend does not implement -scale %s; using %s\r\n", scaleMode, scaleFit)
-		}
 		return playVideoNative(ctx, path, startFrame)
 	}
 
@@ -729,6 +733,11 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+	if err := validateNativeScaleMode(scaleMode, nativeBackendAvailable()); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		flag.Usage()
+		os.Exit(2)
+	}
 
 	seekAmountInFrames = seekSeconds * fps
 	frameReadyCond = sync.NewCond(&stateMutex)
@@ -896,6 +905,10 @@ func renderInfoLine(status string, currentFrame, frameRate int, speed float64, t
 // printInfoUnlocked is the core display logic without mutex locking.
 func printInfoUnlocked(status string, currentFrame, termH, frameRate int, speed float64, totalFrames int) {
 	infoLine := termH + 1
-	info := renderInfoLine(status, currentFrame, frameRate, speed, totalFrames, width)
+	infoWidth := width
+	if columns, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && columns > 0 {
+		infoWidth = columns
+	}
+	info := renderInfoLine(status, currentFrame, frameRate, speed, totalFrames, infoWidth)
 	fmt.Printf("\x1b[%d;1H\x1b[K%s", infoLine, info)
 }
