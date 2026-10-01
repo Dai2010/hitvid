@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build the native media bridge and its pinned static dependencies. The Go
-# fallback remains usable when this optional native build is unavailable.
+# Build the pinned static media libraries used by the standalone backend.
+# These are build-time dependencies only; release binaries link them statically.
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$ROOT_DIR/native/build"}
@@ -17,34 +17,49 @@ locked_version() {
 FFMPEG_VERSION=${FFMPEG_VERSION:-$(locked_version ffmpeg)}
 CHAFA_VERSION=${CHAFA_VERSION:-$(locked_version chafa)}
 GLIB_VERSION=${GLIB_VERSION:-$(locked_version glib)}
+FFMPEG_SHA256=${FFMPEG_SHA256:-$(locked_version ffmpeg_sha256)}
+CHAFA_SHA256=${CHAFA_SHA256:-$(locked_version chafa_sha256)}
+GLIB_SHA256=${GLIB_SHA256:-$(locked_version glib_sha256)}
 
-for tool in curl tar make cc pkg-config meson autoreconf; do
+for tool in curl tar make cc pkg-config meson ninja autoreconf; do
     command -v "$tool" >/dev/null || {
         echo "required native build tool missing: $tool" >&2
         exit 1
     }
 done
 
-mkdir -p "$SRC_DIR" "$PREFIX" "$BUILD_DIR/lib"
+mkdir -p "$SRC_DIR"
+
+prepare_prefix() {
+    # Static libraries are release inputs. Rebuild the prefix from pinned,
+    # checksummed sources every time so stale or locally modified archives
+    # cannot be silently linked into a standalone binary.
+    rm -rf "$PREFIX"
+    mkdir -p "$PREFIX"
+}
 
 fetch_source() {
     local name=$1
     local url=$2
     local archive="$SRC_DIR/$name.tar.xz"
     local source="$SRC_DIR/$name"
-    if [[ ! -d "$source" ]]; then
-        [[ -f "$archive" ]] || curl -fL --retry 3 -o "$archive" "$url"
-        tar -xJf "$archive" -C "$SRC_DIR"
+    [[ -f "$archive" ]] || curl -fL --retry 3 -o "$archive" "$url"
+    local expected="${3:-}"
+    if [[ -n "$expected" ]]; then
+        echo "$expected  $archive" | sha256sum -c - >/dev/null
     fi
+
+    # Never trust a previously extracted tree for a rebuild. The archive is
+    # the pinned, checksummed input; re-extracting it prevents stale or
+    # locally modified source trees from bypassing versions.lock.
+    rm -rf "$source"
+    tar -xJf "$archive" -C "$SRC_DIR"
     printf '%s\n' "$source"
 }
 
 build_ffmpeg() {
     local source
-    source=$(fetch_source "ffmpeg-$FFMPEG_VERSION" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz")
-    if [[ -f "$PREFIX/lib/libavcodec.a" ]]; then
-        return
-    fi
+    source=$(fetch_source "ffmpeg-$FFMPEG_VERSION" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" "$FFMPEG_SHA256")
     pushd "$source" >/dev/null
     ./configure \
         --prefix="$PREFIX" \
@@ -53,8 +68,8 @@ build_ffmpeg() {
         --disable-network --disable-autodetect --disable-everything \
         --disable-x86asm \
         --enable-protocol=file \
-        --enable-demuxer=avi,flv,matroska,mov,mpegts \
-        --enable-decoder=av1,h264,hevc,mjpeg,mpeg1video,mpeg2video,mpeg4,vp8,vp9 \
+        --enable-demuxer=avi,flv,image2,matroska,mov,mpegts \
+        --enable-decoder=av1,h264,hevc,mjpeg,mpeg1video,mpeg2video,mpeg4,ppm,vp8,vp9 \
         --enable-parser=av1,h264,hevc,mjpeg,mpeg4video,vp3,vp8,vp9
     make -j"$JOBS"
     make install
@@ -63,10 +78,8 @@ build_ffmpeg() {
 
 build_glib() {
     local source
-    source=$(fetch_source "glib-$GLIB_VERSION" "https://download.gnome.org/sources/glib/${GLIB_VERSION%.*}/glib-$GLIB_VERSION.tar.xz")
-    if [[ -f "$PREFIX/lib/libglib-2.0.a" ]]; then
-        return
-    fi
+    source=$(fetch_source "glib-$GLIB_VERSION" "https://download.gnome.org/sources/glib/${GLIB_VERSION%.*}/glib-$GLIB_VERSION.tar.xz" "$GLIB_SHA256")
+    rm -rf "$source/build-hitvid"
     meson setup "$source/build-hitvid" "$source" \
         --prefix="$PREFIX" --libdir=lib --buildtype=release \
         -Ddefault_library=static -Dtests=false -Dglib_debug=disabled \
@@ -78,13 +91,10 @@ build_glib() {
 
 build_chafa() {
     local source
-    source=$(fetch_source "chafa-$CHAFA_VERSION" "https://github.com/hpjansson/chafa/releases/download/$CHAFA_VERSION/chafa-$CHAFA_VERSION.tar.xz")
-    if [[ -f "$PREFIX/lib/libchafa.a" ]]; then
-        return
-    fi
+    source=$(fetch_source "chafa-$CHAFA_VERSION" "https://github.com/hpjansson/chafa/releases/download/$CHAFA_VERSION/chafa-$CHAFA_VERSION.tar.xz" "$CHAFA_SHA256")
     pushd "$source" >/dev/null
     [[ -f configure ]] || autoreconf -fi
-    PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure \
+    PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig" ./configure \
         --prefix="$PREFIX" --disable-shared --enable-static --without-tools \
         --without-avif --without-jpeg --without-jxl --without-svg \
         --without-tiff --without-webp
@@ -93,19 +103,10 @@ build_chafa() {
     popd >/dev/null
 }
 
-build_bridge() {
-    local cflags libs
-    cflags="-I$ROOT_DIR/native/include -I$PREFIX/include/chafa -I$PREFIX/lib/chafa/include $(PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" pkg-config --cflags glib-2.0)"
-    libs="$(PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" pkg-config --static --libs chafa glib-2.0)"
-    cc -std=c11 -O2 -fPIC $cflags -c "$ROOT_DIR/native/src/media_bridge.c" \
-        -o "$BUILD_DIR/media_bridge.o"
-    ar rcs "$BUILD_DIR/lib/libhitvidmedia.a" "$BUILD_DIR/media_bridge.o"
-    printf '%s\n' "$libs -L$PREFIX/lib -lavformat -lavcodec -lswscale -lswresample -lavutil" \
-        > "$BUILD_DIR/native.ldflags"
-}
-
-build_ffmpeg
-build_glib
-build_chafa
-build_bridge
-echo "Native dependencies and bridge built under $BUILD_DIR"
+if [[ "${HITVID_BUILD_NATIVE_LIBS:-1}" == "1" ]]; then
+    prepare_prefix
+    build_ffmpeg
+    build_glib
+    build_chafa
+    echo "Pinned static FFmpeg, GLib and Chafa libraries built under $BUILD_DIR"
+fi
