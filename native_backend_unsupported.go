@@ -1,4 +1,4 @@
-//go:build native && !(linux && amd64)
+//go:build native && !(cgo && (linux || android) && (amd64 || arm64))
 
 package main
 

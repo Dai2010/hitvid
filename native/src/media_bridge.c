@@ -301,6 +301,30 @@ static ChafaDitherMode hv_dither_mode(const char *dither)
     return CHAFA_DITHER_MODE_ORDERED;
 }
 
+/* Mirrors the chafa CLI's terminal detection. A bare chafa_term_info_new()
+ * describes no capabilities at all, which suppresses colour, cursor returns
+ * and every other sequence chafa_canvas_print would otherwise emit. The
+ * fallback is folded in because hitvid lets the user force a canvas mode the
+ * detected terminal may not advertise. */
+static ChafaTermInfo *hv_term_info_new(void)
+{
+    ChafaTermDb *db = chafa_term_db_get_default();
+    gchar **envp = g_get_environ();
+    ChafaTermInfo *term_info = chafa_term_db_detect(db, envp);
+    ChafaTermInfo *fallback = chafa_term_db_get_fallback_info(db);
+
+    g_strfreev(envp);
+
+    if (!term_info) {
+        return fallback;
+    }
+    if (fallback) {
+        chafa_term_info_supplement(term_info, fallback);
+        chafa_term_info_unref(fallback);
+    }
+    return term_info;
+}
+
 int hv_renderer_open(int width, int height, const char *symbols, const char *colors,
                      const char *dither, hv_renderer **out)
 {
@@ -310,7 +334,7 @@ int hv_renderer_open(int width, int height, const char *symbols, const char *col
     *out = NULL;
     hv_renderer *renderer = g_new0(hv_renderer, 1);
     renderer->config = chafa_canvas_config_new();
-    renderer->term_info = chafa_term_info_new();
+    renderer->term_info = hv_term_info_new();
     if (!renderer->config || !renderer->term_info) {
         hv_renderer_close(renderer);
         return hv_set_error("could not allocate Chafa renderer");

@@ -1,4 +1,3 @@
-//go:build native && linux && amd64
-// +build native,linux,amd64
+//go:build native && cgo && (linux || android) && (amd64 || arm64)
 
 #include "native/src/media_bridge.c"
