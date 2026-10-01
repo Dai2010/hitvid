@@ -21,7 +21,7 @@ FFMPEG_SHA256=${FFMPEG_SHA256:-$(locked_version ffmpeg_sha256)}
 CHAFA_SHA256=${CHAFA_SHA256:-$(locked_version chafa_sha256)}
 GLIB_SHA256=${GLIB_SHA256:-$(locked_version glib_sha256)}
 
-for tool in curl tar make cc pkg-config meson ninja autoreconf; do
+for tool in curl tar make cc ar nm pkg-config meson ninja autoreconf; do
     command -v "$tool" >/dev/null || {
         echo "required native build tool missing: $tool" >&2
         exit 1
@@ -103,10 +103,40 @@ build_chafa() {
     popd >/dev/null
 }
 
+build_media_bridge() {
+    local object="$BUILD_DIR/media_bridge.o"
+    local archive="$PREFIX/lib/libhitvid_media_bridge.a"
+
+    # Keep the bridge implementation in its own archive instead of relying on
+    # cgo to discover and compile a .c file from the Go package.  The latter is
+    # easy to break when build tags or package layout change and produces
+    # undefined hv_* references only at the final external-link step.
+    cc -std=c11 -O2 -fPIC \
+        -I"$ROOT_DIR/native/include" \
+        -I"$PREFIX/include/chafa" \
+        -I"$PREFIX/include" \
+        -I"$PREFIX/include/glib-2.0" \
+        -I"$PREFIX/lib/chafa/include" \
+        -I"$PREFIX/lib/glib-2.0/include" \
+        -c "$ROOT_DIR/native/src/media_bridge.c" \
+        -o "$object"
+    ar rcs "$archive" "$object"
+
+    # Fail during the native build, close to the source of the problem, if a
+    # future toolchain change drops the bridge symbols from the archive.
+    for symbol in hv_decoder_open hv_decoder_next hv_renderer_open hv_renderer_render; do
+        if ! nm -g --defined-only "$archive" | awk '{print $3}' | grep -qx "$symbol"; then
+            echo "native media bridge archive is missing symbol: $symbol" >&2
+            return 1
+        fi
+    done
+}
+
 if [[ "${HITVID_BUILD_NATIVE_LIBS:-1}" == "1" ]]; then
     prepare_prefix
     build_ffmpeg
     build_glib
     build_chafa
+    build_media_bridge
     echo "Pinned static FFmpeg, GLib and Chafa libraries built under $BUILD_DIR"
 fi
