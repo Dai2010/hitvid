@@ -25,7 +25,13 @@ for tool in go cc file readelf; do
 done
 
 bash "$ROOT_DIR/scripts/build-native.sh"
+bash "$ROOT_DIR/scripts/write-source-manifest.sh"
 mkdir -p "$(dirname "$OUTPUT")"
+cp "$ROOT_DIR/third_party/NOTICES.md" "$(dirname "$OUTPUT")/NOTICES.md"
+cp "$ROOT_DIR/third_party/SOURCE-OFFER.md" "$(dirname "$OUTPUT")/SOURCE-OFFER.md"
+rm -rf "$(dirname "$OUTPUT")/licenses"
+cp -R "$ROOT_DIR/third_party/licenses" "$(dirname "$OUTPUT")/licenses"
+tar -czf "$(dirname "$OUTPUT")/THIRD_PARTY_LICENSES.tar.gz" -C "$(dirname "$OUTPUT")" licenses
 
 (
     cd "$ROOT_DIR"

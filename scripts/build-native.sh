@@ -17,6 +17,9 @@ locked_version() {
 FFMPEG_VERSION=${FFMPEG_VERSION:-$(locked_version ffmpeg)}
 CHAFA_VERSION=${CHAFA_VERSION:-$(locked_version chafa)}
 GLIB_VERSION=${GLIB_VERSION:-$(locked_version glib)}
+FFMPEG_SHA256=${FFMPEG_SHA256:-$(locked_version ffmpeg_sha256)}
+CHAFA_SHA256=${CHAFA_SHA256:-$(locked_version chafa_sha256)}
+GLIB_SHA256=${GLIB_SHA256:-$(locked_version glib_sha256)}
 
 for tool in curl tar make cc pkg-config meson ninja autoreconf; do
     command -v "$tool" >/dev/null || {
@@ -34,6 +37,10 @@ fetch_source() {
     local source="$SRC_DIR/$name"
     if [[ ! -d "$source" ]]; then
         [[ -f "$archive" ]] || curl -fL --retry 3 -o "$archive" "$url"
+        local expected="${3:-}"
+        if [[ -n "$expected" ]]; then
+            echo "$expected  $archive" | sha256sum -c -
+        fi
         tar -xJf "$archive" -C "$SRC_DIR"
     fi
     printf '%s\n' "$source"
@@ -41,7 +48,7 @@ fetch_source() {
 
 build_ffmpeg() {
     local source
-    source=$(fetch_source "ffmpeg-$FFMPEG_VERSION" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz")
+    source=$(fetch_source "ffmpeg-$FFMPEG_VERSION" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" "$FFMPEG_SHA256")
     if [[ -f "$PREFIX/lib/libavcodec.a" ]]; then
         return
     fi
@@ -63,7 +70,7 @@ build_ffmpeg() {
 
 build_glib() {
     local source
-    source=$(fetch_source "glib-$GLIB_VERSION" "https://download.gnome.org/sources/glib/${GLIB_VERSION%.*}/glib-$GLIB_VERSION.tar.xz")
+    source=$(fetch_source "glib-$GLIB_VERSION" "https://download.gnome.org/sources/glib/${GLIB_VERSION%.*}/glib-$GLIB_VERSION.tar.xz" "$GLIB_SHA256")
     if [[ -f "$PREFIX/lib/libglib-2.0.a" ]]; then
         return
     fi
@@ -79,7 +86,7 @@ build_glib() {
 
 build_chafa() {
     local source
-    source=$(fetch_source "chafa-$CHAFA_VERSION" "https://github.com/hpjansson/chafa/releases/download/$CHAFA_VERSION/chafa-$CHAFA_VERSION.tar.xz")
+    source=$(fetch_source "chafa-$CHAFA_VERSION" "https://github.com/hpjansson/chafa/releases/download/$CHAFA_VERSION/chafa-$CHAFA_VERSION.tar.xz" "$CHAFA_SHA256")
     if [[ -f "$PREFIX/lib/libchafa.a" ]]; then
         return
     fi

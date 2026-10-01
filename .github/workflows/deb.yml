@@ -56,6 +56,13 @@ jobs:
           env -i HOME=/tmp TERM=xterm-256color PATH=/nonexistent             ./dist/hitvid-linux-amd64 -help >/dev/null
           dpkg-deb --info dist/*.deb
           dpkg-deb --contents dist/*.deb
+          test -f dist/NOTICES.md
+          test -f dist/SOURCE-OFFER.md
+          test -f dist/SOURCE-MANIFEST.txt
+          test -f dist/THIRD_PARTY_LICENSES.tar.gz
+          dpkg-deb --contents dist/*.deb | grep -q '/copyright$'
+          dpkg-deb --contents dist/*.deb | grep -q 'THIRD_PARTY_NOTICES.md'
+          dpkg-deb --contents dist/*.deb | grep -q 'SOURCE-OFFER.md'
           test "$(dpkg-deb --field dist/*.deb Architecture)" = amd64
           test -z "$(dpkg-deb --field dist/*.deb Depends || true)"
 
@@ -66,6 +73,10 @@ jobs:
           path: |
             dist/hitvid-linux-amd64
             dist/*.deb
+            dist/NOTICES.md
+            dist/SOURCE-OFFER.md
+            dist/SOURCE-MANIFEST.txt
+            dist/THIRD_PARTY_LICENSES.tar.gz
           if-no-files-found: error
 
   publish-release:

@@ -30,7 +30,15 @@ mkdir -p "$package_root/DEBIAN" "$package_root/usr/bin" "$package_root/usr/share
 
 install -m 0755 "$BINARY" "$package_root/usr/bin/hitvid"
 install -m 0644 "$ROOT_DIR/README.md" "$package_root/usr/share/doc/hitvid/README.md"
-install -m 0644 "$ROOT_DIR/LICENSE" "$package_root/usr/share/doc/hitvid/LICENSE"
+install -m 0644 "$ROOT_DIR/LICENSE" "$package_root/usr/share/doc/hitvid/copyright"
+install -m 0644 "$ROOT_DIR/third_party/NOTICES.md" "$package_root/usr/share/doc/hitvid/THIRD_PARTY_NOTICES.md"
+install -m 0644 "$ROOT_DIR/third_party/SOURCE-OFFER.md" "$package_root/usr/share/doc/hitvid/SOURCE-OFFER.md"
+if [[ -f "$DIST_DIR/SOURCE-MANIFEST.txt" ]]; then
+    install -m 0644 "$DIST_DIR/SOURCE-MANIFEST.txt" "$package_root/usr/share/doc/hitvid/SOURCE-MANIFEST.txt"
+fi
+install -m 0644 "$ROOT_DIR/third_party/licenses/LGPL-2.1.txt" "$package_root/usr/share/doc/hitvid/LGPL-2.1.txt"
+install -m 0644 "$ROOT_DIR/third_party/licenses/LGPL-3.0.txt" "$package_root/usr/share/doc/hitvid/LGPL-3.0.txt"
+install -m 0644 "$ROOT_DIR/third_party/licenses/OTHER-LICENSES.md" "$package_root/usr/share/doc/hitvid/OTHER-LICENSES.md"
 if [[ -f "$ROOT_DIR/report/report_1.2.2.md" ]]; then
     install -m 0644 "$ROOT_DIR/report/report_1.2.2.md" "$package_root/usr/share/doc/hitvid/report_1.2.2.md"
 fi
