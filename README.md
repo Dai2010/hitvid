@@ -87,6 +87,7 @@ The player's behavior can be fine-tuned with the following flags:
 | `-dither <str>`   | Dithering algorithm for chafa (e.g., `none`, `ordered`, `diffusion`).       | `ordered`                |
 | `-w <integer>`    | Render width in terminal columns.                                           | Terminal width           |
 | `-h <integer>`    | Render height in terminal rows.                                             | Terminal height - 1      |
+| `-scale <mode>`   | Scaling mode: `fit`, `fill`, or `stretch`.                                  | `fit`                    |
 | `-threads <int>`  | Number of parallel threads to use for rendering frames with Chafa.          | `4`                      |
 | `-help`           | Display a detailed help message and exit.                                   | `false`                  |
 

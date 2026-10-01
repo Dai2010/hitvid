@@ -45,6 +45,7 @@ var (
 	width      int
 	height     int
 	numThreads int
+	scaleMode  string
 	showHelp   bool
 )
 
@@ -88,11 +89,77 @@ func validateNumThreads(threads int) error {
 	return nil
 }
 
+func validateScaleMode(mode string) error {
+	switch mode {
+	case scaleFit, scaleFill, scaleStretch:
+		return nil
+	}
+	return fmt.Errorf("-scale must be one of %s, %s or %s (got %q)", scaleFit, scaleFill, scaleStretch, mode)
+}
+
+// validateDimensions rejects negative -w/-h before the terminal defaults are
+// applied. buildVideoFilter turns these into scale and crop sizes, where a
+// negative value either fails the filter graph outright or, in ffmpeg's
+// expression language, quietly produces something else.
+func validateDimensions(width, height int) error {
+	if width < 0 || height < 0 {
+		return fmt.Errorf("-w and -h must not be negative (got %d and %d)", width, height)
+	}
+	return nil
+}
+
+// buildVideoFilter renders the FFmpeg -vf argument for one scaling mode. The
+// pixel box is the character canvas converted to pixels, so the frame FFmpeg
+// produces already has the shape Chafa is about to draw into: "fit" keeps the
+// source aspect inside that box (letterboxed), "fill" grows the source to cover
+// the box and crops the overflow, and "stretch" distorts the source to the box.
+func buildVideoFilter(frameRate, width, height int, mode string) string {
+	boxWidth := width * chafaSourceScale
+	boxHeight := height * chafaSourceScale * cellAspectRatio
+	var scaleFilter string
+	switch mode {
+	case scaleFill:
+		scaleFilter = fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d",
+			boxWidth, boxHeight, boxWidth, boxHeight)
+	case scaleStretch:
+		scaleFilter = fmt.Sprintf("scale=%d:%d", boxWidth, boxHeight)
+	default:
+		scaleFilter = fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", boxWidth, boxHeight)
+	}
+	return fmt.Sprintf("fps=%d,%s", frameRate, scaleFilter)
+}
+
 var supportedVideoExtensions = map[string]bool{
 	".mp4": true, ".mkv": true, ".mov": true, ".avi": true, ".webm": true, ".flv": true,
 }
 
 const renderedFrameCapacity = 120
+
+// ffmpegThreads caps FFmpeg's decoder threads. The pipeline only consumes fps
+// frames per second and the decoder is back-pressured by frameSlots, so one
+// decode thread keeps up; FFmpeg's frame threading multiplies the decoder's
+// frame pool, which on HD video costs tens of MB of RAM for no added
+// throughput.
+const ffmpegThreads = 1
+
+// chafaSourceScale is how many source pixels per terminal column FFmpeg hands
+// to Chafa. A cell is only a few subpixels wide, so Chafa resamples every frame
+// down to the canvas anyway; 6 keeps FFmpeg's scale and MJPEG-encode cost near
+// its floor while still giving Chafa a few samples per cell to dither with.
+const chafaSourceScale = 6
+
+// Scaling modes accepted by the -scale flag.
+const (
+	scaleFit     = "fit"
+	scaleFill    = "fill"
+	scaleStretch = "stretch"
+)
+
+// cellAspectRatio is a terminal cell's height divided by its width. Cells are
+// about twice as tall as they are wide, which is also the ratio Chafa assumes
+// by default, so the pixel box handed to FFmpeg has the same shape as the
+// character canvas.
+const cellAspectRatio = 2
 
 type renderJob struct {
 	index int
@@ -343,6 +410,9 @@ func handleInput(ctx context.Context, events <-chan inputEvent, cancel context.C
 // seek restarts FFmpeg at a new timestamp.
 func playVideo(ctx context.Context, path string, startFrame int) string {
 	if nativeBackendAvailable() {
+		if scaleMode != scaleFit {
+			log.Printf("Warning: the native backend does not implement -scale %s; using %s\r\n", scaleMode, scaleFit)
+		}
 		return playVideoNative(ctx, path, startFrame)
 	}
 
@@ -407,11 +477,19 @@ func playVideo(ctx context.Context, path string, startFrame int) string {
 	}
 
 	// --- Start FFmpeg and stream JPEG frames directly through stdout ---
-	ffmpegVF := fmt.Sprintf("fps=%d,scale='min(iw,%d)':-1", fps, width*8)
-	ffmpegArgs := []string{"-nostdin", "-hide_banner", "-loglevel", "warning", "-i", path}
+	ffmpegVF := buildVideoFilter(fps, width, height, scaleMode)
+	ffmpegArgs := []string{
+		"-nostdin", "-hide_banner", "-loglevel", "warning",
+		"-threads", strconv.Itoa(ffmpegThreads),
+	}
 	if startFrame > 0 {
+		// -ss belongs before -i: FFmpeg then seeks at the demuxer. Placed after
+		// -i it decodes and discards every frame from the start of the file
+		// instead, which each seek pays for with no back-pressure to hold it
+		// back.
 		ffmpegArgs = append(ffmpegArgs, "-ss", fmt.Sprintf("%.3f", float64(startFrame)/float64(fps)))
 	}
+	ffmpegArgs = append(ffmpegArgs, "-i", path)
 	ffmpegArgs = append(ffmpegArgs, "-vf", ffmpegVF, "-q:v", "2", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1")
 	ffmpegCmd := exec.CommandContext(sessionCtx, "ffmpeg", ffmpegArgs...)
 	var ffmpegErr bytes.Buffer
@@ -582,6 +660,8 @@ func printHelp() {
                Render width. (Default: terminal width)
             -h <integer>
                Render height. (Default: terminal height - 1)
+            -scale <mode>
+               Scaling mode: fit, fill or stretch. (Default: "fit")
             -threads <integer>
                Number of parallel threads to use for rendering. (Default: 4)
             -help, -help
@@ -607,6 +687,7 @@ func main() {
 	flag.StringVar(&dither, "dither", "ordered", "Dithering mode")
 	flag.IntVar(&width, "w", 0, "Display width (default: terminal width)")
 	flag.IntVar(&height, "h", 0, "Display height (default: terminal height - 1)")
+	flag.StringVar(&scaleMode, "scale", scaleFit, "Scaling mode: fit, fill or stretch")
 	flag.IntVar(&numThreads, "threads", 4, "Number of parallel threads for Chafa rendering")
 	flag.BoolVar(&showHelp, "help", false, "Show detailed program description")
 
@@ -634,6 +715,16 @@ func main() {
 		}
 	}
 	if err := validateNumThreads(numThreads); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		flag.Usage()
+		os.Exit(2)
+	}
+	if err := validateScaleMode(scaleMode); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		flag.Usage()
+		os.Exit(2)
+	}
+	if err := validateDimensions(width, height); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		flag.Usage()
 		os.Exit(2)
@@ -678,8 +769,19 @@ func main() {
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
 	fmt.Print("\x1b[?25l\x1b[?1049h")
-	defer fmt.Print("\x1b[?1049l\x1b[?25h")
-	defer fmt.Print("\r\nPlayback finished. Thank you for using hitvid!\r\n")
+	defer func() {
+		// Leave the alternate screen before printing anything: switching back
+		// restores the previous screen contents, so a message written while the
+		// alternate screen is still active is discarded. The banner lands on the
+		// normal screen, so clip it to the terminal rather than to the video
+		// canvas - the two differ whenever -w or -h was given.
+		fmt.Print("\x1b[?1049l\x1b[?25h")
+		bannerWidth := width
+		if columns, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+			bannerWidth = columns
+		}
+		fmt.Print("\r\n", clipToTerminalWidth(exitBanner, bannerWidth), "\r\n")
+	}()
 
 	// --- Main Control Loop ---
 	resumeFrame := 0
@@ -750,25 +852,50 @@ func printInfo(status string, current, termH, frameRate int, speed float64) {
 	printInfoUnlocked(status, current, termH, frameRate, speed, total)
 }
 
-// printInfoUnlocked is the core display logic without mutex locking.
-func printInfoUnlocked(status string, currentFrame, termH, frameRate int, speed float64, totalFrames int) {
+// controlsHint is the fixed key legend appended to the playback status line.
+const controlsHint = "Spc:Pause, +/-:Speed, L/R:Seek, U/D:Track, Q:Quit"
+
+// exitBanner is printed once the alternate screen has been left.
+const exitBanner = "Playback finished. Thank you for using hitvid!"
+
+// clipToTerminalWidth truncates text to at most width columns. The status line
+// is drawn on the terminal's last row, so a single character past the last
+// column makes the terminal wrap onto a new row, which scrolls the screen and
+// shifts every following frame.
+func clipToTerminalWidth(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= width {
+		return text
+	}
+	return string(runes[:width])
+}
+
+// renderInfoLine builds the status line for one playback state, clipped to
+// width columns so it can never wrap.
+func renderInfoLine(status string, currentFrame, frameRate int, speed float64, totalFrames, width int) string {
 	currentTimeStr := formatTime(currentFrame, frameRate)
-	var totalTimeStr string
+	totalTimeStr := "??:??"
 	if totalFrames > 0 {
 		totalTimeStr = formatTime(totalFrames, frameRate)
-	} else {
-		totalTimeStr = "??:??"
 	}
-	infoLine := termH + 1
-	controls := "Spc:Pause, +/-:Speed, L/R:Seek, U/D:Track, Q:Quit"
 	var info string
 	switch status {
 	case "PLAYING", "PAUSED":
-		info = fmt.Sprintf("[%s] %s / %s | Speed: %.2fx | %s", status, currentTimeStr, totalTimeStr, speed, controls)
+		info = fmt.Sprintf("[%s] %s / %s | Speed: %.2fx | %s", status, currentTimeStr, totalTimeStr, speed, controlsHint)
 	case "BUFFERING":
 		info = fmt.Sprintf("[%s] %s / %s...", status, currentTimeStr, totalTimeStr)
 	case "FINISHED":
 		info = "Playback finished. Press UP/DOWN for next/prev, or Q to quit."
 	}
+	return clipToTerminalWidth(info, width)
+}
+
+// printInfoUnlocked is the core display logic without mutex locking.
+func printInfoUnlocked(status string, currentFrame, termH, frameRate int, speed float64, totalFrames int) {
+	infoLine := termH + 1
+	info := renderInfoLine(status, currentFrame, frameRate, speed, totalFrames, width)
 	fmt.Printf("\x1b[%d;1H\x1b[K%s", infoLine, info)
 }
