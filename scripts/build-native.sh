@@ -28,7 +28,15 @@ for tool in curl tar make cc pkg-config meson ninja autoreconf; do
     }
 done
 
-mkdir -p "$SRC_DIR" "$PREFIX"
+mkdir -p "$SRC_DIR"
+
+prepare_prefix() {
+    # Static libraries are release inputs. Rebuild the prefix from pinned,
+    # checksummed sources every time so stale or locally modified archives
+    # cannot be silently linked into a standalone binary.
+    rm -rf "$PREFIX"
+    mkdir -p "$PREFIX"
+}
 
 fetch_source() {
     local name=$1
@@ -50,9 +58,6 @@ fetch_source() {
 }
 
 build_ffmpeg() {
-    if [[ -f "$PREFIX/lib/libavcodec.a" ]]; then
-        return
-    fi
     local source
     source=$(fetch_source "ffmpeg-$FFMPEG_VERSION" "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" "$FFMPEG_SHA256")
     pushd "$source" >/dev/null
@@ -72,9 +77,6 @@ build_ffmpeg() {
 }
 
 build_glib() {
-    if [[ -f "$PREFIX/lib/libglib-2.0.a" ]]; then
-        return
-    fi
     local source
     source=$(fetch_source "glib-$GLIB_VERSION" "https://download.gnome.org/sources/glib/${GLIB_VERSION%.*}/glib-$GLIB_VERSION.tar.xz" "$GLIB_SHA256")
     rm -rf "$source/build-hitvid"
@@ -88,9 +90,6 @@ build_glib() {
 }
 
 build_chafa() {
-    if [[ -f "$PREFIX/lib/libchafa.a" ]]; then
-        return
-    fi
     local source
     source=$(fetch_source "chafa-$CHAFA_VERSION" "https://github.com/hpjansson/chafa/releases/download/$CHAFA_VERSION/chafa-$CHAFA_VERSION.tar.xz" "$CHAFA_SHA256")
     pushd "$source" >/dev/null
@@ -105,6 +104,7 @@ build_chafa() {
 }
 
 if [[ "${HITVID_BUILD_NATIVE_LIBS:-1}" == "1" ]]; then
+    prepare_prefix
     build_ffmpeg
     build_glib
     build_chafa

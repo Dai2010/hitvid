@@ -21,4 +21,9 @@ printf 'tampered\n' > "$SRC_DIR/cache-probe/payload.txt"
 source_dir=$(fetch_source "cache-probe" "https://invalid.example/cache-probe.tar.xz" "$expected")
 grep -qx 'trusted' "$source_dir/payload.txt"
 
-echo "Native source cache re-extraction check passed"
+mkdir -p "$PREFIX/lib"
+printf 'tampered\n' > "$PREFIX/lib/libavcodec.a"
+prepare_prefix
+test ! -e "$PREFIX/lib/libavcodec.a"
+
+echo "Native source cache re-extraction and prefix reset checks passed"
