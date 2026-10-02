@@ -90,10 +90,11 @@ func TestNativeDecoderOutputGrid(t *testing.T) {
 // the second one and leave exactly half the frames to decode.
 //
 // The MPEG-TS fixture (testdata/offset-start.ts, stream start_time 1.48 s) is
-// not asserted here: seeking it to the same 1.0 s currently decodes nothing at
-// all, and it does so with this call, with stream->start_time added, and with
-// the AV_TIME_BASE form (stream_index -1). That is an open defect of its own, so
-// it is left as a finding rather than frozen in as expected behaviour.
+// not asserted here because its demuxer has no timestamp-to-byte-position index,
+// so avformat_seek_file may land on a coarse keyframe rather than the requested
+// relative time. Adding stream->start_time was measured to move the target even
+// farther forward and can reach EOF. Track the container-specific seek behavior
+// separately in issue #7 instead of freezing a coarse landing point as expected.
 func TestNativeDecoderSeekLandsOnTheTargetKeyframe(t *testing.T) {
 	if total := decodeToEnd(t, gridFixture, 0); total != 48 {
 		t.Fatalf("fixture holds %d frames, want 48", total)
