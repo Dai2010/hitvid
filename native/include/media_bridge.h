@@ -21,6 +21,7 @@ typedef struct {
 
 int hv_decoder_open(const char *path, int target_fps, int max_width, hv_decoder **out);
 double hv_decoder_duration(const hv_decoder *decoder);
+double hv_decoder_last_frame_pts(const hv_decoder *decoder);
 int hv_decoder_next(hv_decoder *decoder, hv_video_frame *out);
 int hv_decoder_seek(hv_decoder *decoder, double seconds);
 void hv_decoder_close(hv_decoder *decoder);

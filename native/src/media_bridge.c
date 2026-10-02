@@ -5,6 +5,8 @@
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/mathematics.h>
+#include <libavutil/mem.h>
 #include <libswscale/swscale.h>
 
 #include <stdio.h>
@@ -33,6 +35,11 @@ const char *hv_last_error(void)
     return hv_error;
 }
 
+typedef struct {
+    int64_t pos;
+    int64_t timestamp;
+} hv_seek_entry;
+
 struct hv_decoder {
     AVFormatContext *format;
     AVCodecContext *codec;
@@ -58,7 +65,182 @@ struct hv_decoder {
     int rgb_size;
     int flushed;
     int packet_pending;
+
+    /* MPEG-TS generic timestamp search may index arbitrary packets as
+     * keyframes. Keep a separate, lazy index containing only packets that the
+     * demuxer itself marks AV_PKT_FLAG_KEY, and seek the playback context by
+     * their byte positions. */
+    char *path;
+    AVFormatContext *seek_format;
+    AVPacket *seek_packet;
+    int seek_stream_index;
+    int seek_scan_eof;
+    int64_t seek_indexed_through;
+    hv_seek_entry *seek_entries;
+    size_t seek_entry_count;
+    size_t seek_entry_capacity;
+
+    double last_frame_pts;
 };
+
+static int hv_decoder_is_mpegts(const hv_decoder *decoder)
+{
+    return decoder && decoder->format && decoder->format->iformat &&
+           decoder->format->iformat->name &&
+           strcmp(decoder->format->iformat->name, "mpegts") == 0;
+}
+
+static int hv_decoder_open_seek_scanner(hv_decoder *decoder)
+{
+    if (decoder->seek_format) {
+        return 0;
+    }
+
+    AVFormatContext *format = NULL;
+    int ret = avformat_open_input(&format, decoder->path, NULL, NULL);
+    if (ret < 0) {
+        return hv_set_av_error("could not open MPEG-TS seek scanner", ret);
+    }
+    ret = avformat_find_stream_info(format, NULL);
+    if (ret < 0) {
+        avformat_close_input(&format);
+        return hv_set_av_error("could not read MPEG-TS seek stream info", ret);
+    }
+
+    const AVCodec *codec = NULL;
+    ret = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
+    if (ret < 0 || !codec) {
+        avformat_close_input(&format);
+        return hv_set_av_error("could not find MPEG-TS seek video stream",
+                               ret < 0 ? ret : AVERROR(EINVAL));
+    }
+
+    AVPacket *packet = av_packet_alloc();
+    if (!packet) {
+        avformat_close_input(&format);
+        return hv_set_error("could not allocate MPEG-TS seek packet");
+    }
+
+    decoder->seek_format = format;
+    decoder->seek_packet = packet;
+    decoder->seek_stream_index = ret;
+    decoder->seek_indexed_through = INT64_MIN;
+    return 0;
+}
+
+static int hv_decoder_add_seek_entry(hv_decoder *decoder, int64_t pos, int64_t timestamp)
+{
+    if (pos < 0 || timestamp == AV_NOPTS_VALUE) {
+        return 0;
+    }
+    if (decoder->seek_entry_count > 0 &&
+        decoder->seek_entries[decoder->seek_entry_count - 1].pos == pos) {
+        return 0;
+    }
+
+    if (decoder->seek_entry_count == decoder->seek_entry_capacity) {
+        size_t capacity = decoder->seek_entry_capacity ? decoder->seek_entry_capacity * 2 : 64;
+        hv_seek_entry *entries = av_realloc_array(decoder->seek_entries, capacity,
+                                                   sizeof(*decoder->seek_entries));
+        if (!entries) {
+            return hv_set_error("could not grow MPEG-TS seek index");
+        }
+        decoder->seek_entries = entries;
+        decoder->seek_entry_capacity = capacity;
+    }
+
+    decoder->seek_entries[decoder->seek_entry_count++] =
+        (hv_seek_entry){ .pos = pos, .timestamp = timestamp };
+    return 0;
+}
+
+static int hv_decoder_scan_seek_index(hv_decoder *decoder, int64_t target_timestamp)
+{
+    int ret = hv_decoder_open_seek_scanner(decoder);
+    if (ret < 0) {
+        return ret;
+    }
+
+    AVStream *main_stream = decoder->format->streams[decoder->stream_index];
+    AVStream *scan_stream = decoder->seek_format->streams[decoder->seek_stream_index];
+    int64_t target_scan_timestamp =
+        av_rescale_q(target_timestamp, main_stream->time_base, scan_stream->time_base);
+
+    while (!decoder->seek_scan_eof &&
+           decoder->seek_indexed_through < target_scan_timestamp) {
+        ret = av_read_frame(decoder->seek_format, decoder->seek_packet);
+        if (ret == AVERROR_EOF) {
+            decoder->seek_scan_eof = 1;
+            break;
+        }
+        if (ret < 0) {
+            return hv_set_av_error("could not scan MPEG-TS seek index", ret);
+        }
+
+        AVPacket *packet = decoder->seek_packet;
+        if (packet->stream_index == decoder->seek_stream_index) {
+            int64_t timestamp =
+                packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
+            int64_t progress =
+                packet->dts != AV_NOPTS_VALUE ? packet->dts : timestamp;
+
+            if ((packet->flags & AV_PKT_FLAG_KEY) && packet->pos >= 0 &&
+                timestamp != AV_NOPTS_VALUE) {
+                int64_t main_timestamp =
+                    av_rescale_q(timestamp, scan_stream->time_base, main_stream->time_base);
+                ret = hv_decoder_add_seek_entry(decoder, packet->pos, main_timestamp);
+                if (ret < 0) {
+                    av_packet_unref(packet);
+                    return ret;
+                }
+            }
+
+            if (progress != AV_NOPTS_VALUE &&
+                progress > decoder->seek_indexed_through) {
+                decoder->seek_indexed_through = progress;
+            }
+        }
+        av_packet_unref(packet);
+    }
+
+    return 0;
+}
+
+static int64_t hv_decoder_find_seek_position(const hv_decoder *decoder,
+                                             int64_t target_timestamp)
+{
+    int64_t best_timestamp = INT64_MIN;
+    int64_t best_pos = -1;
+
+    for (size_t i = 0; i < decoder->seek_entry_count; i++) {
+        const hv_seek_entry *entry = &decoder->seek_entries[i];
+        if (entry->timestamp <= target_timestamp &&
+            entry->timestamp >= best_timestamp) {
+            best_timestamp = entry->timestamp;
+            best_pos = entry->pos;
+        }
+    }
+    return best_pos;
+}
+
+static int hv_decoder_seek_mpegts(hv_decoder *decoder, int64_t target_timestamp)
+{
+    int ret = hv_decoder_scan_seek_index(decoder, target_timestamp);
+    if (ret < 0) {
+        return ret;
+    }
+
+    int64_t pos = hv_decoder_find_seek_position(decoder, target_timestamp);
+    if (pos < 0) {
+        pos = 0;
+    }
+
+    ret = av_seek_frame(decoder->format, -1, pos, AVSEEK_FLAG_BYTE);
+    if (ret < 0) {
+        return hv_set_av_error("could not seek MPEG-TS to indexed keyframe", ret);
+    }
+    return 0;
+}
 
 static int hv_decoder_prepare_scaler(hv_decoder *decoder, const AVFrame *frame)
 {
@@ -131,6 +313,15 @@ int hv_decoder_open(const char *path, int target_fps, int max_width, hv_decoder 
     }
     decoder->max_width = max_width;
     decoder->target_fps = target_fps;
+    decoder->seek_stream_index = -1;
+    decoder->seek_indexed_through = INT64_MIN;
+    decoder->last_frame_pts = NAN;
+    decoder->path = av_strdup(path);
+    if (!decoder->path) {
+        hv_set_error("could not copy decoder path");
+        hv_decoder_close(decoder);
+        return AVERROR(ENOMEM);
+    }
 
     int ret = avformat_open_input(&decoder->format, path, NULL, NULL);
     if (ret < 0) {
@@ -194,6 +385,11 @@ double hv_decoder_duration(const hv_decoder *decoder)
     return (double)decoder->format->duration / AV_TIME_BASE;
 }
 
+double hv_decoder_last_frame_pts(const hv_decoder *decoder)
+{
+    return decoder ? decoder->last_frame_pts : NAN;
+}
+
 int hv_decoder_next(hv_decoder *decoder, hv_video_frame *out)
 {
     if (!decoder || !out) {
@@ -204,16 +400,16 @@ int hv_decoder_next(hv_decoder *decoder, hv_video_frame *out)
     for (;;) {
         int ret = avcodec_receive_frame(decoder->codec, decoder->frame);
         if (ret == 0) {
-            if (decoder->target_fps > 0 &&
-                decoder->frame->best_effort_timestamp != AV_NOPTS_VALUE) {
+            double pts = NAN;
+            if (decoder->frame->best_effort_timestamp != AV_NOPTS_VALUE) {
                 AVRational time_base = decoder->format->streams[decoder->stream_index]->time_base;
-                /* Timestamps are offset by the stream's start_time, which is not
-                 * always zero (MPEG-TS commonly starts around 1.4 s), while the
-                 * output grid and hv_decoder_seek both count from zero.
-                 * Subtracting it here keeps the slots aligned with the frame the
-                 * player asked for; without it they drift by that offset. */
-                double pts = (decoder->frame->best_effort_timestamp - decoder->start_time) *
-                             av_q2d(time_base);
+                /* Public seek positions and the output grid are relative to the
+                 * first presentation timestamp, while container timestamps may
+                 * start at a non-zero value. */
+                pts = (decoder->frame->best_effort_timestamp - decoder->start_time) *
+                      av_q2d(time_base);
+            }
+            if (decoder->target_fps > 0 && !isnan(pts)) {
                 /* Keep the first frame falling into each slot of the output grid. Testing a
                  * running deadline instead loses frames whenever the container timestamps are
                  * coarser than the stream time base: a 24 fps source carrying millisecond pts
@@ -249,6 +445,7 @@ int hv_decoder_next(hv_decoder *decoder, hv_video_frame *out)
             out->width = decoder->output_width;
             out->height = decoder->output_height;
             out->stride = decoder->rgb_stride;
+            decoder->last_frame_pts = pts;
             return 1;
         }
         if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
@@ -299,13 +496,28 @@ int hv_decoder_seek(hv_decoder *decoder, double seconds)
     if (!decoder || !decoder->format) {
         return hv_set_error("invalid decoder seek arguments");
     }
+    if (seconds < 0.0) {
+        seconds = 0.0;
+    }
+
     AVRational time_base = decoder->format->streams[decoder->stream_index]->time_base;
-    int64_t timestamp = (int64_t)(seconds / av_q2d(time_base));
-    int ret = avformat_seek_file(decoder->format, decoder->stream_index,
-                                 INT64_MIN, timestamp, INT64_MAX,
-                                 AVSEEK_FLAG_BACKWARD);
+    int64_t relative_timestamp =
+        av_rescale_q((int64_t)llround(seconds * AV_TIME_BASE),
+                     AV_TIME_BASE_Q, time_base);
+    int64_t timestamp = decoder->start_time + relative_timestamp;
+
+    int ret;
+    if (hv_decoder_is_mpegts(decoder)) {
+        ret = hv_decoder_seek_mpegts(decoder, timestamp);
+    } else {
+        ret = avformat_seek_file(decoder->format, decoder->stream_index,
+                                 INT64_MIN, timestamp, INT64_MAX, 0);
+        if (ret < 0) {
+            return hv_set_av_error("could not seek video", ret);
+        }
+    }
     if (ret < 0) {
-        return hv_set_av_error("could not seek video", ret);
+        return ret;
     }
     avcodec_flush_buffers(decoder->codec);
     if (decoder->packet_pending) {
@@ -314,6 +526,7 @@ int hv_decoder_seek(hv_decoder *decoder, double seconds)
         decoder->packet_pending = 0;
     }
     decoder->flushed = 0;
+    decoder->last_frame_pts = NAN;
     decoder->next_output_index = (int64_t)floor(seconds * decoder->target_fps + 0.5);
     return 0;
 }
@@ -325,9 +538,13 @@ void hv_decoder_close(hv_decoder *decoder)
     }
     av_frame_free(&decoder->frame);
     av_packet_free(&decoder->packet);
+    av_packet_free(&decoder->seek_packet);
     sws_freeContext(decoder->sws);
     av_freep(&decoder->rgb);
+    av_freep(&decoder->seek_entries);
+    av_freep(&decoder->path);
     avcodec_free_context(&decoder->codec);
+    avformat_close_input(&decoder->seek_format);
     avformat_close_input(&decoder->format);
     av_free(decoder);
 }

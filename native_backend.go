@@ -56,6 +56,10 @@ func (decoder *nativeDecoder) seek(seconds float64) error {
 	return nil
 }
 
+func (decoder *nativeDecoder) lastFramePTS() float64 {
+	return float64(C.hv_decoder_last_frame_pts(decoder.ptr))
+}
+
 func (decoder *nativeDecoder) next() ([]byte, int, int, int, int, error) {
 	var frame C.hv_video_frame
 	rc := C.hv_decoder_next(decoder.ptr, &frame)
