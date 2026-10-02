@@ -4,7 +4,7 @@ package main
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/native/include -I${SRCDIR}/native/build/prefix/include/chafa -I${SRCDIR}/native/build/prefix/include -I${SRCDIR}/native/build/prefix/include/glib-2.0 -I${SRCDIR}/native/build/prefix/lib/chafa/include -I${SRCDIR}/native/build/prefix/lib/glib-2.0/include
-#cgo LDFLAGS: -L${SRCDIR}/native/build/prefix/lib -Wl,--start-group -lchafa -lglib-2.0 -lavformat -lavcodec -lswscale -lswresample -lavutil -Wl,--end-group -lpcre2-8 -lffi -lz -latomic -pthread -ldl -lm
+#cgo LDFLAGS: -L${SRCDIR}/native/build/prefix/lib -Wl,--start-group -lhitvid_media_bridge -lchafa -lglib-2.0 -lavformat -lavcodec -lswscale -lswresample -lavutil -Wl,--end-group -lpcre2-8 -lffi -lz -latomic -pthread -ldl -lm
 #include <stdlib.h>
 #include "native/include/media_bridge.h"
 */
