@@ -95,6 +95,12 @@ func (renderer *nativeRenderer) close() {
 }
 
 func (renderer *nativeRenderer) render(pixels []byte, frameWidth, frameHeight, stride int) ([]byte, error) {
+	if len(pixels) == 0 {
+		// The C renderer takes the buffer by pointer, so an empty slice would
+		// panic here - inside a render worker, which kills the process instead
+		// of dropping one frame.
+		return nil, fmt.Errorf("refusing to render an empty frame")
+	}
 	var output *C.char
 	var outputSize C.size_t
 	if rc := C.hv_renderer_render(renderer.ptr, (*C.uint8_t)(unsafe.Pointer(&pixels[0])), C.int(frameWidth), C.int(frameHeight), C.int(stride), &output, &outputSize); rc < 0 {
