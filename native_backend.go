@@ -1,4 +1,4 @@
-//go:build native && linux && amd64
+//go:build native && cgo && (linux || android) && (amd64 || arm64)
 
 package main
 
@@ -11,9 +11,11 @@ package main
 import "C"
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
+	"runtime"
 	"sync"
 	"unsafe"
 )
@@ -165,6 +167,9 @@ func playVideoNative(ctx context.Context, path string, startFrame int) string {
 				}
 				if renderErr != nil && sessionCtx.Err() == nil {
 					log.Printf("native Chafa frame %d failed: %v\r\n", job.index, renderErr)
+				}
+				if runtime.GOOS != "windows" && output != nil {
+					output = bytes.ReplaceAll(output, []byte("\n"), []byte("\r\n"))
 				}
 				stateMutex.Lock()
 				frameStore.put(job.index, output)

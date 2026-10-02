@@ -42,7 +42,7 @@ struct hv_decoder {
     int stream_index;
     int max_width;
     int target_fps;
-    double next_output_pts;
+    int64_t next_output_index;
     int output_width;
     int output_height;
     uint8_t *rgb;
@@ -185,11 +185,17 @@ int hv_decoder_next(hv_decoder *decoder, hv_video_frame *out)
                 decoder->frame->best_effort_timestamp != AV_NOPTS_VALUE) {
                 AVRational time_base = decoder->format->streams[decoder->stream_index]->time_base;
                 double pts = decoder->frame->best_effort_timestamp * av_q2d(time_base);
-                if (isfinite(decoder->next_output_pts) && pts + 1e-9 < decoder->next_output_pts) {
+                /* Keep the first frame falling into each slot of the output grid. Testing a
+                 * running deadline instead loses frames whenever the container timestamps are
+                 * coarser than the stream time base: a 24 fps source carrying millisecond pts
+                 * drops about one frame in three at -fps 24, and at the default -fps 15 settles
+                 * on every second frame, playing 1.25x too fast. */
+                int64_t index = (int64_t)floor(pts * decoder->target_fps + 0.5);
+                if (index < decoder->next_output_index) {
                     av_frame_unref(decoder->frame);
                     continue;
                 }
-                decoder->next_output_pts = pts + 1.0 / decoder->target_fps;
+                decoder->next_output_index = index + 1;
             }
             ret = hv_decoder_prepare_scaler(decoder, decoder->frame);
             if (ret < 0) {
@@ -252,7 +258,7 @@ int hv_decoder_seek(hv_decoder *decoder, double seconds)
     }
     avcodec_flush_buffers(decoder->codec);
     decoder->flushed = 0;
-    decoder->next_output_pts = seconds;
+    decoder->next_output_index = (int64_t)floor(seconds * decoder->target_fps + 0.5);
     return 0;
 }
 
@@ -301,6 +307,30 @@ static ChafaDitherMode hv_dither_mode(const char *dither)
     return CHAFA_DITHER_MODE_ORDERED;
 }
 
+/* Mirrors the chafa CLI's terminal detection. A bare chafa_term_info_new()
+ * describes no capabilities at all, which suppresses colour, cursor returns
+ * and every other sequence chafa_canvas_print would otherwise emit. The
+ * fallback is folded in because hitvid lets the user force a canvas mode the
+ * detected terminal may not advertise. */
+static ChafaTermInfo *hv_term_info_new(void)
+{
+    ChafaTermDb *db = chafa_term_db_get_default();
+    gchar **envp = g_get_environ();
+    ChafaTermInfo *term_info = chafa_term_db_detect(db, envp);
+    ChafaTermInfo *fallback = chafa_term_db_get_fallback_info(db);
+
+    g_strfreev(envp);
+
+    if (!term_info) {
+        return fallback;
+    }
+    if (fallback) {
+        chafa_term_info_supplement(term_info, fallback);
+        chafa_term_info_unref(fallback);
+    }
+    return term_info;
+}
+
 int hv_renderer_open(int width, int height, const char *symbols, const char *colors,
                      const char *dither, hv_renderer **out)
 {
@@ -310,7 +340,7 @@ int hv_renderer_open(int width, int height, const char *symbols, const char *col
     *out = NULL;
     hv_renderer *renderer = g_new0(hv_renderer, 1);
     renderer->config = chafa_canvas_config_new();
-    renderer->term_info = chafa_term_info_new();
+    renderer->term_info = hv_term_info_new();
     if (!renderer->config || !renderer->term_info) {
         hv_renderer_close(renderer);
         return hv_set_error("could not allocate Chafa renderer");

@@ -15,5 +15,6 @@ jobs:
       - run: go test ./...
       - run: go run . -help
       - run: go build -o hitvid .
+      # arm64 is a supported native target now, so probe one that is not.
       - name: Check unsupported native target package setup
-        run: GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go test -c -tags native -o /tmp/hitvid-arm64.test
+        run: GOOS=linux GOARCH=arm CGO_ENABLED=1 go test -c -tags native -o /tmp/hitvid-arm.test
