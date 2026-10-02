@@ -43,12 +43,21 @@ struct hv_decoder {
     int max_width;
     int target_fps;
     int64_t next_output_index;
+    /* Stream timestamps are offset by start_time, which is not always zero, so
+     * the output grid has to be measured from there. */
+    int64_t start_time;
     int output_width;
     int output_height;
+    /* The cached sws context is only valid for the input geometry it was built
+     * from, so remember what that was. */
+    int input_width;
+    int input_height;
+    int input_format;
     uint8_t *rgb;
     int rgb_stride;
     int rgb_size;
     int flushed;
+    int packet_pending;
 };
 
 static int hv_decoder_prepare_scaler(hv_decoder *decoder, const AVFrame *frame)
@@ -69,8 +78,16 @@ static int hv_decoder_prepare_scaler(hv_decoder *decoder, const AVFrame *frame)
         output_height = 2;
     }
 
-    if (decoder->sws && decoder->output_width == output_width &&
-        decoder->output_height == output_height) {
+    /* The cached context is only valid for the exact input geometry and pixel
+     * format it was built from: after a mid-stream resolution or format change
+     * reusing it would keep scaling from the old layout and hand out corrupt
+     * RGB. */
+    if (decoder->sws &&
+        decoder->output_width == output_width &&
+        decoder->output_height == output_height &&
+        decoder->input_width == width &&
+        decoder->input_height == height &&
+        decoder->input_format == frame->format) {
         return 0;
     }
 
@@ -95,6 +112,9 @@ static int hv_decoder_prepare_scaler(hv_decoder *decoder, const AVFrame *frame)
     decoder->rgb_stride = output_width * 3;
     decoder->output_width = output_width;
     decoder->output_height = output_height;
+    decoder->input_width = width;
+    decoder->input_height = height;
+    decoder->input_format = frame->format;
     return 0;
 }
 
@@ -133,6 +153,9 @@ int hv_decoder_open(const char *path, int target_fps, int max_width, hv_decoder 
         return ret < 0 ? ret : AVERROR(EINVAL);
     }
     decoder->stream_index = ret;
+    decoder->start_time = decoder->format->streams[ret]->start_time != AV_NOPTS_VALUE
+                              ? decoder->format->streams[ret]->start_time
+                              : 0;
     decoder->codec = avcodec_alloc_context3(codec);
     if (!decoder->codec) {
         hv_set_error("could not allocate codec context");
@@ -184,7 +207,13 @@ int hv_decoder_next(hv_decoder *decoder, hv_video_frame *out)
             if (decoder->target_fps > 0 &&
                 decoder->frame->best_effort_timestamp != AV_NOPTS_VALUE) {
                 AVRational time_base = decoder->format->streams[decoder->stream_index]->time_base;
-                double pts = decoder->frame->best_effort_timestamp * av_q2d(time_base);
+                /* Timestamps are offset by the stream's start_time, which is not
+                 * always zero (MPEG-TS commonly starts around 1.4 s), while the
+                 * output grid and hv_decoder_seek both count from zero.
+                 * Subtracting it here keeps the slots aligned with the frame the
+                 * player asked for; without it they drift by that offset. */
+                double pts = (decoder->frame->best_effort_timestamp - decoder->start_time) *
+                             av_q2d(time_base);
                 /* Keep the first frame falling into each slot of the output grid. Testing a
                  * running deadline instead loses frames whenever the container timestamps are
                  * coarser than the stream time base: a 24 fps source carrying millisecond pts
@@ -203,10 +232,18 @@ int hv_decoder_next(hv_decoder *decoder, hv_video_frame *out)
             }
             uint8_t *dst[] = {decoder->rgb, NULL, NULL, NULL};
             int dst_linesize[] = {decoder->rgb_stride, 0, 0, 0};
-            sws_scale(decoder->sws,
-                      (const uint8_t *const *)decoder->frame->data,
-                      decoder->frame->linesize, 0, decoder->frame->height,
-                      dst, dst_linesize);
+            if (sws_scale(decoder->sws,
+                          (const uint8_t *const *)decoder->frame->data,
+                          decoder->frame->linesize, 0, decoder->frame->height,
+                          dst, dst_linesize) <= 0) {
+                /* A failure (or an empty conversion) leaves the destination
+                 * buffer partly written, so drop the frame instead of handing it
+                 * out. Dropping rather than returning an error keeps one bad
+                 * frame from ending the whole playback; every loop turn consumes
+                 * a frame, so this cannot spin. */
+                av_frame_unref(decoder->frame);
+                continue;
+            }
             out->pixels = decoder->rgb;
             out->size = (size_t)decoder->rgb_size;
             out->width = decoder->output_width;
@@ -224,20 +261,34 @@ int hv_decoder_next(hv_decoder *decoder, hv_video_frame *out)
         if (decoder->flushed) {
             return 0;
         }
-        ret = av_read_frame(decoder->format, decoder->packet);
-        if (ret < 0) {
-            decoder->flushed = 1;
-            ret = avcodec_send_packet(decoder->codec, NULL);
-            if (ret < 0 && ret != AVERROR_EOF) {
-                return hv_set_av_error("could not flush decoder", ret);
+        if (!decoder->packet_pending) {
+            ret = av_read_frame(decoder->format, decoder->packet);
+            if (ret < 0) {
+                decoder->flushed = 1;
+                ret = avcodec_send_packet(decoder->codec, NULL);
+                if (ret < 0 && ret != AVERROR_EOF) {
+                    return hv_set_av_error("could not flush decoder", ret);
+                }
+                continue;
             }
+            if (decoder->packet->stream_index != decoder->stream_index) {
+                av_packet_unref(decoder->packet);
+                continue;
+            }
+            decoder->packet_pending = 1;
+        }
+        ret = avcodec_send_packet(decoder->codec, decoder->packet);
+        if (ret == AVERROR(EAGAIN)) {
+            /* Input is full. By the send/receive contract the packet was not
+             * consumed, and once the pending output has been drained the resend
+             * succeeds, so keep it pending and let the next iteration receive a
+             * frame. Unreferencing here, as this loop used to, drops the packet
+             * and with it a decoded frame. */
             continue;
         }
-        if (decoder->packet->stream_index == decoder->stream_index) {
-            ret = avcodec_send_packet(decoder->codec, decoder->packet);
-        }
+        decoder->packet_pending = 0;
         av_packet_unref(decoder->packet);
-        if (ret < 0 && ret != AVERROR(EAGAIN)) {
+        if (ret < 0) {
             return hv_set_av_error("could not submit packet", ret);
         }
     }
@@ -257,6 +308,11 @@ int hv_decoder_seek(hv_decoder *decoder, double seconds)
         return hv_set_av_error("could not seek video", ret);
     }
     avcodec_flush_buffers(decoder->codec);
+    if (decoder->packet_pending) {
+        /* A packet held back for retry belongs to the pre-seek timeline. */
+        av_packet_unref(decoder->packet);
+        decoder->packet_pending = 0;
+    }
     decoder->flushed = 0;
     decoder->next_output_index = (int64_t)floor(seconds * decoder->target_fps + 0.5);
     return 0;
