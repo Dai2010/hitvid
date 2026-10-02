@@ -207,10 +207,11 @@ int hv_decoder_next(hv_decoder *decoder, hv_video_frame *out)
             if (decoder->target_fps > 0 &&
                 decoder->frame->best_effort_timestamp != AV_NOPTS_VALUE) {
                 AVRational time_base = decoder->format->streams[decoder->stream_index]->time_base;
-                /* Timestamps are relative to the stream's start, which is not
-                 * always zero (MPEG-TS typically starts around 1.4 s). The grid
-                 * is anchored at the first frame, so measure from there;
-                 * otherwise the slots drift by the container's start offset. */
+                /* Timestamps are offset by the stream's start_time, which is not
+                 * always zero (MPEG-TS commonly starts around 1.4 s), while the
+                 * output grid and hv_decoder_seek both count from zero.
+                 * Subtracting it here keeps the slots aligned with the frame the
+                 * player asked for; without it they drift by that offset. */
                 double pts = (decoder->frame->best_effort_timestamp - decoder->start_time) *
                              av_q2d(time_base);
                 /* Keep the first frame falling into each slot of the output grid. Testing a
@@ -234,10 +235,14 @@ int hv_decoder_next(hv_decoder *decoder, hv_video_frame *out)
             if (sws_scale(decoder->sws,
                           (const uint8_t *const *)decoder->frame->data,
                           decoder->frame->linesize, 0, decoder->frame->height,
-                          dst, dst_linesize) < 0) {
-                /* The destination buffer is left partially written, so handing
-                 * it out would present garbage as if it were a valid frame. */
-                return hv_set_error("could not scale video frame");
+                          dst, dst_linesize) <= 0) {
+                /* A failure (or an empty conversion) leaves the destination
+                 * buffer partly written, so drop the frame instead of handing it
+                 * out. Dropping rather than returning an error keeps one bad
+                 * frame from ending the whole playback; every loop turn consumes
+                 * a frame, so this cannot spin. */
+                av_frame_unref(decoder->frame);
+                continue;
             }
             out->pixels = decoder->rgb;
             out->size = (size_t)decoder->rgb_size;
